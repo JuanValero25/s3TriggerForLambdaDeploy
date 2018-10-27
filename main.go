@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 )
 
 const s3StaticValue = "https://s3.amazonaws.com/"
@@ -35,36 +36,32 @@ type lambdaConfig struct {
 }
 
 func handler(ctx context.Context, s3Event events.S3Event) {
-
-	file, err := os.Create("/temp/main.zip")
+	file, err := os.Create("/tmp/main.zip")
 	if err != nil {
 		fmt.Println("Unable to open file ", err)
 	}
-
-	defer file.Close()
-
 	sess, _ := session.NewSession(&aws.Config{
 		Region: aws.String("us-east-1")},
 	)
-
+	start := time.Now()
 	downloader := s3manager.NewDownloader(sess)
-
 	for _, record := range s3Event.Records {
 		s3object := record.S3
-		numBytes, err := downloader.Download(file,
+		downloader.Download(file,
 			&s3.GetObjectInput{
 				Bucket: aws.String(s3object.Bucket.Name),
 				Key:    aws.String(s3object.Object.Key),
 			})
-		if err != nil {
-			fmt.Println("Unable to download item ", numBytes, err)
-		}
+		elapsed := time.Since(start)
+		log.Printf("download took  %s", elapsed)
 		lambdaConfigs := Unzip()
 		if existLambda(lambdaConfigs) {
 			updateLambda(s3object, lambdaConfigs)
+			return
 		}
 		ExampleLambda_CreateFunction(s3object, lambdaConfigs)
 	}
+
 }
 
 func main() {
@@ -72,8 +69,6 @@ func main() {
 }
 
 func ExampleLambda_CreateFunction(s3 events.S3Entity, conf *lambdaConfig) {
-	fmt.Println("configs desde la function create functions ", *conf)
-	fmt.Println("configs desde la function create functions sin apuntador ", conf)
 	svc := lambda.New(session.New())
 	input := &lambda.CreateFunctionInput{
 		Code: &lambda.FunctionCode{
@@ -122,56 +117,53 @@ func ExampleLambda_CreateFunction(s3 events.S3Entity, conf *lambdaConfig) {
 }
 
 func existLambda(conf *lambdaConfig) bool {
+	fmt.Println("entrando a la funcion existeLambda")
 	svc := lambda.New(session.New())
 	input := &lambda.GetFunctionInput{FunctionName: aws.String(conf.Function)}
 	_, err := svc.GetFunction(input)
 	fmt.Println("el error chequindo si existe algun lambda con el nombre ", err)
-	if strings.Contains(err.Error(), "ResourceNotFoundException") {
+	if err == nil {
 		return true
 	}
 	return false
 }
 
 func updateLambda(s3 events.S3Entity, conf *lambdaConfig) {
+	fmt.Println("entrado al update lambda")
 	svc := lambda.New(session.New())
-	input := &lambda.UpdateFunctionCodeInput{S3Key: aws.String(s3.Object.Key), S3Bucket: aws.String(s3.Bucket.Name), Publish: aws.Bool(true)}
-	result, err := svc.UpdateFunctionCode(input)
-	fmt.Println("resultado de update function ", result)
-	fmt.Println("error del resultado de update function ", err)
-
-	//input := &lambda.CreateAliasInput{S3Key:aws.String(s3.Object.Key),S3Bucket:aws.String(s3.Bucket.Name)}
+	input := &lambda.UpdateFunctionCodeInput{FunctionName: aws.String(conf.Function), S3Key: aws.String(s3.Object.Key), S3Bucket: aws.String(s3.Bucket.Name), Publish: aws.Bool(true)}
+	_, err := svc.UpdateFunctionCode(input)
+	if err != nil {
+		fmt.Println("error del resultado de update function ", err)
+	}
 
 }
 
 func Unzip() (c *lambdaConfig) {
-
-	r, err := zip.OpenReader("/temp/main.zip")
+	var cofigs lambdaConfig
+	r, err := zip.OpenReader("/tmp/main.zip")
 	if err != nil {
 		fmt.Println(err)
 		return nil
 	}
-	defer r.Close()
 	for _, f := range r.File {
 		if strings.Contains(f.Name, "json") {
 			rc, err := f.Open()
-			var c lambdaConfig
-			c.getConf(rc)
-			fmt.Println(c)
+			cofigs.getConf(rc)
 			if err != nil {
-				fmt.Println(err)
+				fmt.Println(" config parsed finished ", err)
 				return nil
 			}
 		}
 	}
-	return c
+	return &cofigs
 }
 
 func (c *lambdaConfig) getConf(rc io.ReadCloser) *lambdaConfig {
 	jsonFile, err := ioutil.ReadAll(rc)
 	if err != nil {
-		log.Printf("error ", err)
+		log.Printf("error with json", err)
 	}
 	json.Unmarshal(jsonFile, &c)
-
 	return c
 }
