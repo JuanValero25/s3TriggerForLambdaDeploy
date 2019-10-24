@@ -2,11 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/aws/aws-lambda-go/events"
-	lambdaHandler "github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -36,7 +36,7 @@ type lambdaConfig struct {
 }
 
 func handler(ctx context.Context, s3Event events.S3Event) {
-	file, err := os.Create("/tmp/main.zip")
+	file, err := os.Create("tmp/main.zip")
 	if err != nil {
 		fmt.Println("Unable to open file ", err)
 	}
@@ -47,7 +47,7 @@ func handler(ctx context.Context, s3Event events.S3Event) {
 	downloader := s3manager.NewDownloader(sess)
 	for _, record := range s3Event.Records {
 		s3object := record.S3
-		downloader.Download(file,
+		_, _ = downloader.Download(file,
 			&s3.GetObjectInput{
 				Bucket: aws.String(s3object.Bucket.Name),
 				Key:    aws.String(s3object.Object.Key),
@@ -65,7 +65,27 @@ func handler(ctx context.Context, s3Event events.S3Event) {
 }
 
 func main() {
-	lambdaHandler.Start(handler)
+	//lambdaHandler.Start(handler)
+
+	handler(nil, events.S3Event{Records: []events.S3EventRecord{{
+		S3: events.S3Entity{
+			SchemaVersion:   "12",
+			ConfigurationID: "12",
+			Bucket: events.S3Bucket{
+				Name:          "codebuild-physisprofile-api-ci-cd",
+				OwnerIdentity: events.S3UserIdentity{},
+				Arn:           "",
+			},
+			Object: events.S3Object{
+				Key:           "develop/physis-profile-api/cef17c4e-b95e-4518-9794-c0b057fae69e/physis-profile-api_Develop",
+				Size:          0,
+				URLDecodedKey: "",
+				VersionID:     "",
+				ETag:          "",
+				Sequencer:     "",
+			},
+		},
+	}}})
 }
 
 func ExampleLambda_CreateFunction(s3 events.S3Entity, conf *lambdaConfig) {
@@ -141,14 +161,15 @@ func updateLambda(s3 events.S3Entity, conf *lambdaConfig) {
 
 func Unzip() (c *lambdaConfig) {
 	var cofigs lambdaConfig
-	r, err := zip.OpenReader("/tmp/main.zip")
+	r, err := zip.OpenReader("tmp/main.zip")
 	if err != nil {
 		fmt.Println(err)
 		return nil
 	}
 	for _, f := range r.File {
-		if strings.Contains(f.Name, "json") {
+		if strings.Contains(f.Name, "lambda.properties") {
 			rc, err := f.Open()
+			ReadPropertiesFile(rc)
 			cofigs.getConf(rc)
 			if err != nil {
 				fmt.Println(" config parsed finished ", err)
@@ -166,4 +187,31 @@ func (c *lambdaConfig) getConf(rc io.ReadCloser) *lambdaConfig {
 	}
 	json.Unmarshal(jsonFile, &c)
 	return c
+}
+
+type AppConfigProperties map[string]string
+
+func ReadPropertiesFile(file io.Reader) (AppConfigProperties, error) {
+	config := AppConfigProperties{}
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if equal := strings.Index(line, "="); equal >= 0 {
+			if key := strings.TrimSpace(line[:equal]); len(key) > 0 {
+				value := ""
+				if len(line) > equal {
+					value = strings.TrimSpace(line[equal+1:])
+				}
+				config[key] = value
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Fatal(err)
+		return nil, err
+	}
+
+	return config, nil
 }
