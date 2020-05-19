@@ -4,9 +4,9 @@ import (
 	"archive/zip"
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/aws/aws-lambda-go/events"
+	lambdaHandler "github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -14,29 +14,16 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
-const s3StaticValue = "https://s3.amazonaws.com/"
-
-type lambdaConfig struct {
-	Function    string            `json:"Function"`
-	Memory      int64             `json:"Memory"`
-	Handler     string            `json:"Handler"`
-	Runtime     string            `json:"Runtime"`
-	CodeUri     string            `json:"CodeUri"`
-	Description string            `json:"Description"`
-	Role        string            `json:"Role"`
-	Timeout     int64             `json:"Timeout"`
-	Environment map[string]string `json:"Environment"`
-}
-
-func handler(ctx context.Context, s3Event events.S3Event) {
-	file, err := os.Create("tmp/main.zip")
+func handler(ctx context.Context, s3Event events.S3Event) (err error) {
+	var file *os.File
+	file, err = os.Create("/tmp/main.zip")
 	if err != nil {
 		fmt.Println("Unable to open file ", err)
 	}
@@ -45,6 +32,7 @@ func handler(ctx context.Context, s3Event events.S3Event) {
 	)
 	start := time.Now()
 	downloader := s3manager.NewDownloader(sess)
+	var lambdaFunctionConf *lambda.FunctionConfiguration
 	for _, record := range s3Event.Records {
 		s3object := record.S3
 		_, _ = downloader.Download(file,
@@ -54,61 +42,34 @@ func handler(ctx context.Context, s3Event events.S3Event) {
 			})
 		elapsed := time.Since(start)
 		log.Printf("download took  %s", elapsed)
-		lambdaConfigs := Unzip()
-		if existLambda(lambdaConfigs) {
-			updateLambda(s3object, lambdaConfigs)
-			return
+		lambdaConfigs, err := Unzip(s3object)
+		if err != nil {
+			return err
 		}
-		ExampleLambda_CreateFunction(s3object, lambdaConfigs)
-	}
 
+		if existLambda(lambdaConfigs) {
+			lambdaFunctionConf = updateLambda(s3object, lambdaConfigs)
+
+		} else {
+			lambdaFunctionConf = CreateLambdaFunction(lambdaConfigs)
+		}
+		createAlias(getStageByS3Key(s3object.Object.Key), lambdaFunctionConf)
+
+	}
+	os.Remove("/tmp/main.zip")
+	return err
 }
 
 func main() {
-	//lambdaHandler.Start(handler)
-
-	handler(nil, events.S3Event{Records: []events.S3EventRecord{{
-		S3: events.S3Entity{
-			SchemaVersion:   "12",
-			ConfigurationID: "12",
-			Bucket: events.S3Bucket{
-				Name:          "codebuild-physisprofile-api-ci-cd",
-				OwnerIdentity: events.S3UserIdentity{},
-				Arn:           "",
-			},
-			Object: events.S3Object{
-				Key:           "develop/physis-profile-api/cef17c4e-b95e-4518-9794-c0b057fae69e/physis-profile-api_Develop",
-				Size:          0,
-				URLDecodedKey: "",
-				VersionID:     "",
-				ETag:          "",
-				Sequencer:     "",
-			},
-		},
-	}}})
+	lambdaHandler.Start(handler)
 }
 
-func ExampleLambda_CreateFunction(s3 events.S3Entity, conf *lambdaConfig) {
-	svc := lambda.New(session.New())
-	input := &lambda.CreateFunctionInput{
-		Code: &lambda.FunctionCode{
-			S3Bucket: aws.String(s3.Bucket.Name),
-			S3Key:    aws.String(s3.Object.Key),
-		},
-		Description:  aws.String(conf.Description),
-		FunctionName: aws.String(conf.Function),
-		Handler:      aws.String("main"),
-		MemorySize:   aws.Int64(conf.Memory),
-		Publish:      aws.Bool(true),
-		Role:         aws.String(conf.Role),
-		Runtime:      aws.String(lambda.RuntimeGo1X),
-		Timeout:      aws.Int64(conf.Timeout),
-		Environment: &lambda.Environment{
-			Variables: aws.StringMap(conf.Environment),
-		},
-	}
+func CreateLambdaFunction(lambdaConfiguration *lambda.CreateFunctionInput) (result *lambda.FunctionConfiguration) {
+	fmt.Println("entrado CreateFunction")
 
-	result, err := svc.CreateFunction(input)
+	svc := lambda.New(session.New(&aws.Config{
+		Region: aws.String("us-east-1")}))
+	result, err := svc.CreateFunction(lambdaConfiguration)
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok {
 			switch aerr.Code() {
@@ -132,66 +93,105 @@ func ExampleLambda_CreateFunction(s3 events.S3Entity, conf *lambdaConfig) {
 		}
 		return
 	}
-
 	fmt.Println(result)
+	return
 }
 
-func existLambda(conf *lambdaConfig) bool {
+func createAlias(stage string, functionConfig *lambda.FunctionConfiguration) {
+	svc := lambda.New(session.New(&aws.Config{
+		Region: aws.String("us-east-1")}))
+	aliasInput := &lambda.UpdateAliasInput{
+		FunctionName:    functionConfig.FunctionName,
+		FunctionVersion: functionConfig.Version,
+		Name:            aws.String(stage),
+	}
+	getAliasAliasInput := &lambda.GetAliasInput{
+		FunctionName: functionConfig.FunctionName,
+		Name:         aws.String(stage),
+	}
+	_, err := svc.GetAlias(getAliasAliasInput)
+
+	if err != nil {
+		fmt.Println("creating alias")
+		createAliasInput := &lambda.CreateAliasInput{
+			FunctionName:    functionConfig.FunctionName,
+			FunctionVersion: functionConfig.Version,
+			Name:            aws.String(stage),
+		}
+		_, err := svc.CreateAlias(createAliasInput)
+		if err != nil {
+			fmt.Println(err)
+		}
+		return
+	}
+	fmt.Println("updating alias")
+	_, err = svc.UpdateAlias(aliasInput)
+
+	if err != nil {
+		fmt.Println("error creating alias : ", err)
+	}
+}
+
+func existLambda(conf *lambda.CreateFunctionInput) bool {
 	fmt.Println("entrando a la funcion existeLambda")
-	svc := lambda.New(session.New())
-	input := &lambda.GetFunctionInput{FunctionName: aws.String(conf.Function)}
+	svc := lambda.New(session.New(&aws.Config{
+		Region: aws.String("us-east-1")}))
+	//arn:aws:lambda:us-east-1:655622384061:function:
+	input := &lambda.GetFunctionInput{FunctionName: aws.String("arn:aws:lambda:us-east-1:655622384061:function:" + *conf.FunctionName)}
 	_, err := svc.GetFunction(input)
-	fmt.Println("el error chequindo si existe algun lambda con el nombre ", err)
 	if err == nil {
+		fmt.Println("el error chequindo si existe algun lambda con el nombre ", err)
 		return true
 	}
 	return false
 }
 
-func updateLambda(s3 events.S3Entity, conf *lambdaConfig) {
-	fmt.Println("entrado al update lambda")
-	svc := lambda.New(session.New())
-	input := &lambda.UpdateFunctionCodeInput{FunctionName: aws.String(conf.Function), S3Key: aws.String(s3.Object.Key), S3Bucket: aws.String(s3.Bucket.Name), Publish: aws.Bool(true)}
-	_, err := svc.UpdateFunctionCode(input)
-	if err != nil {
-		fmt.Println("error del resultado de update function ", err)
+func getStageByS3Key(s3Key string) string {
+	stage := strings.Split(s3Key, "/")[0]
+	if stage == "develop" {
+		return "DEV"
 	}
+	return "PROD"
 
 }
 
-func Unzip() (c *lambdaConfig) {
-	var cofigs lambdaConfig
-	r, err := zip.OpenReader("tmp/main.zip")
+func updateLambda(s3 events.S3Entity, conf *lambda.CreateFunctionInput) (result *lambda.FunctionConfiguration) {
+	fmt.Println("entrado al update lambda")
+	newSession, err := session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1")})
+	svc := lambda.New(newSession)
+	input := &lambda.UpdateFunctionCodeInput{FunctionName: conf.FunctionName, S3Key: aws.String(s3.Object.Key), S3Bucket: aws.String(s3.Bucket.Name), Publish: aws.Bool(true)}
+	result, err = svc.UpdateFunctionCode(input)
+	if err != nil {
+		fmt.Println("error del resultado de update function ", err)
+	}
+	return
+}
+
+func Unzip(s3 events.S3Entity) (lambdaConfiguration *lambda.CreateFunctionInput, err error) {
+	var r *zip.ReadCloser
+	r, err = zip.OpenReader("/tmp/main.zip")
 	if err != nil {
 		fmt.Println(err)
-		return nil
+		return
 	}
 	for _, f := range r.File {
 		if strings.Contains(f.Name, "lambda.properties") {
 			rc, err := f.Open()
-			ReadPropertiesFile(rc)
-			cofigs.getConf(rc)
+			lambdaConfiguration, err = ReadPropertiesFile(rc, s3)
 			if err != nil {
 				fmt.Println(" config parsed finished ", err)
-				return nil
+				return lambdaConfiguration, err
 			}
+			return lambdaConfiguration, err
 		}
 	}
-	return &cofigs
-}
-
-func (c *lambdaConfig) getConf(rc io.ReadCloser) *lambdaConfig {
-	jsonFile, err := ioutil.ReadAll(rc)
-	if err != nil {
-		log.Printf("error with json", err)
-	}
-	json.Unmarshal(jsonFile, &c)
-	return c
+	return lambdaConfiguration, err
 }
 
 type AppConfigProperties map[string]string
 
-func ReadPropertiesFile(file io.Reader) (AppConfigProperties, error) {
+func ReadPropertiesFile(file io.Reader, s3 events.S3Entity) (lambdaConfiguration *lambda.CreateFunctionInput, err error) {
 	config := AppConfigProperties{}
 
 	scanner := bufio.NewScanner(file)
@@ -208,10 +208,36 @@ func ReadPropertiesFile(file io.Reader) (AppConfigProperties, error) {
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
+	if err = scanner.Err(); err != nil {
 		log.Fatal(err)
-		return nil, err
+		return lambdaConfiguration, err
 	}
-
-	return config, nil
+	var memory int64
+	memory, err = strconv.ParseInt(config["MEMORY_SIZE"], 10, 64)
+	if err != nil {
+		fmt.Println("error parsing properties", err)
+		return
+	}
+	var Timeout int64
+	Timeout, err = strconv.ParseInt(config["TIMEOUT"], 10, 64)
+	if err != nil {
+		fmt.Println("error parsing properties", err)
+		return
+	}
+	publishConfig, err := strconv.ParseBool(config["PUBLISH"])
+	lambdaConfiguration = &lambda.CreateFunctionInput{
+		Code: &lambda.FunctionCode{
+			S3Bucket: aws.String(s3.Bucket.Name),
+			S3Key:    aws.String(s3.Object.Key),
+		},
+		Description:  aws.String(config["LAMBDA_DESCRIPTION"]),
+		FunctionName: aws.String(config["FUNCTION_NAME"]),
+		Handler:      aws.String(config["HANDLER_NAME"]),
+		MemorySize:   aws.Int64(memory),
+		Publish:      aws.Bool(publishConfig),
+		Role:         aws.String(config["DEV_ARN_IAM_ROLE"]),
+		Runtime:      aws.String(lambda.RuntimeNodejs12X),
+		Timeout:      aws.Int64(Timeout),
+	}
+	return
 }
