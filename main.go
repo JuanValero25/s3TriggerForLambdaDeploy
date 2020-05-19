@@ -160,8 +160,27 @@ func updateLambda(s3 events.S3Entity, conf *lambda.CreateFunctionInput) (result 
 	newSession, err := session.NewSession(&aws.Config{
 		Region: aws.String("us-east-1")})
 	svc := lambda.New(newSession)
-	input := &lambda.UpdateFunctionCodeInput{FunctionName: conf.FunctionName, S3Key: aws.String(s3.Object.Key), S3Bucket: aws.String(s3.Bucket.Name), Publish: aws.Bool(true)}
+	input := &lambda.UpdateFunctionCodeInput{
+		FunctionName: conf.FunctionName,
+		Publish:      conf.Publish,
+		S3Bucket:     aws.String(s3.Bucket.Name),
+		S3Key:        aws.String(s3.Object.Key),
+	}
 	result, err = svc.UpdateFunctionCode(input)
+	if err != nil {
+		fmt.Println("error del resultado de update function ", err)
+	}
+
+	result, err = svc.UpdateFunctionConfiguration(&lambda.UpdateFunctionConfigurationInput{
+		Description:  conf.Description,
+		FunctionName: conf.FunctionName,
+		Handler:      conf.Handler,
+		MemorySize:   conf.MemorySize,
+		Role:         conf.Role,
+		Runtime:      conf.Runtime,
+		Timeout:      conf.Timeout,
+		VpcConfig:    conf.VpcConfig,
+	})
 	if err != nil {
 		fmt.Println("error del resultado de update function ", err)
 	}
@@ -224,6 +243,16 @@ func ReadPropertiesFile(file io.Reader, s3 events.S3Entity) (lambdaConfiguration
 		fmt.Println("error parsing properties", err)
 		return
 	}
+	var SecurityGroups []*string
+	var SubNetsID []*string
+	for _, secGrup := range strings.Split(config["SECURITY_GROUPS_ID"], ",") {
+		SecurityGroups = append(SecurityGroups, &secGrup)
+	}
+
+	for _, subNets := range strings.Split(config["SUB_NETS_ID"], ",") {
+		SecurityGroups = append(SubNetsID, &subNets)
+	}
+
 	publishConfig, err := strconv.ParseBool(config["PUBLISH"])
 	lambdaConfiguration = &lambda.CreateFunctionInput{
 		Code: &lambda.FunctionCode{
@@ -238,6 +267,10 @@ func ReadPropertiesFile(file io.Reader, s3 events.S3Entity) (lambdaConfiguration
 		Role:         aws.String(config["DEV_ARN_IAM_ROLE"]),
 		Runtime:      aws.String(lambda.RuntimeNodejs12X),
 		Timeout:      aws.Int64(Timeout),
+		VpcConfig: &lambda.VpcConfig{
+			SecurityGroupIds: SecurityGroups,
+			SubnetIds:        SubNetsID,
+		},
 	}
 	return
 }
